@@ -18,26 +18,23 @@ protected class VM[R](clock: Clock) {
   var time = 0
 
   def run(expr: Expr[R]): R = {
-    new Thread(expr)
+    val main = new Thread(expr)
     while (!threads.isEmpty) {
-      threads.foreach {case (id, t) => {
-        t.continue() match {
+      threads.foreach {case (id, thread) => {
+        thread.continue() match {
           case Some(v) => {
-            if (id == 0) return v.asInstanceOf[R]
+            if (main == thread) return v.asInstanceOf[R]
             threads.remove(id)
           }
-          case None => {}
+          case None => ()
         }
       }}
       clock.step(1)
       time += 1
+      println("==== TIME")
     }
     ???
   }
-
-  abstract class Monitor {}
-  case class ThreadMonitor(ids: Seq[Expr.ThreadID]) extends Monitor
-  case class ClockMonitor(time: Int) extends Monitor
 
   private class Thread[+R](start: Expr[R]) {
     var frame = new Frame(None, start)
@@ -60,36 +57,67 @@ protected class VM[R](clock: Clock) {
       if (resolved) monitor = None
 
       while (monitor == None) {
-        frame.expr match {
-          case Cont(expr, cn) => expr match {
-            case Cont(_,_) => frame = new Frame(Some(frame), expr)
-            case _ =>         frame.expr = cn(flat(expr))
+        val finished = frame.expr match {
+          case Cont(expr, cn) => frame = new Frame(Some(frame), expr)
+          case Until(signal, expr) => {
+            if (signal.peek().litToBoolean == false) {
+              frame = new Frame(Some(frame), expr)
+            } else ret(())
           }
-          case expr => {
-            frame.parent match {
-              case Some(p) => frame = p
-              case None    => return Some(flat(expr.asInstanceOf[Expr[R]]))
-            }
-            frame.expr match {
-              case Cont(_, cn) => frame.expr = cn(flat(expr))
-              case _ => ???
-            }
+          case Repeat(expr, n) => if (n > 0) {
+            frame.expr = Expr.repeat(expr, n-1)
+            frame = new Frame(Some(frame), expr)
+          } else ret(())
+          case Concat(exprs) => if (!exprs.isEmpty) {
+            val expr = exprs(0)
+            frame.expr = Expr.concat(exprs.slice(1,exprs.length))
+            frame = new Frame(Some(frame), expr)
+          } else ret(())
+          case Join(threadids) => {
+            monitor = Some(new ThreadMonitor(threadids))
+            ret(())
           }
+          case Step(cycles) => {
+            monitor = Some(new ClockMonitor(VM.this.time + cycles))
+            ret(())
+          }
+          case Fork(expr) => ret(new Thread(expr).id.asInstanceOf[R])
+          case Poke(signal, value) => ret(signal.poke(value))
+          case Peek(signal) => ret(signal.peek())
+          case Value(r) => ret(r)
+          case Expect(signal, value) => {
+            println(signal, value)
+            signal.expect(value)
+            ret(())
+          }
+          case Debug(msg) => {
+            println(msg)
+            ret(())
+          }
+        }
+        finished match {
+          case Some(v) => return Some(v.asInstanceOf[R])
+          case _ => ()
         }
       }
       None
     }
 
-    private def flat[R](expr: Expr[R]): R = {
-      expr match {
-        case Join(threadids) => monitor = Some(new ThreadMonitor(threadids))
-        case Step(cycles) => monitor = Some(new ClockMonitor(VM.this.time + cycles))
-        case Fork(expr) => new Thread(expr).id.asInstanceOf[R]
-        case Poke(signal, value) => signal.poke(value)
-        case Peek(signal) => signal.peek()
-        case Value(r) => r
-        case _ => ???
+    private def ret(v: Any): Option[R]  = {
+      frame.parent match {
+        case Some(p) => frame = p
+        case None    => return Some(v.asInstanceOf[R])
       }
+      frame.expr match {
+        case Cont(_, cn) => frame.expr = cn(v)
+        case _ => ()
+      }
+      None
     }
   }
 }
+
+private abstract class Monitor {}
+private case class ThreadMonitor(ids: Seq[Expr.ThreadID]) extends Monitor
+private case class ClockMonitor(time: Int) extends Monitor
+

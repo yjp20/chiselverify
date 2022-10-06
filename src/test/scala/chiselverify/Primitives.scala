@@ -2,9 +2,10 @@ package chiselverify
 
 import Expr._
 import chisel3._
+import chisel3.util._
 import chiseltest._
-import chisel3.util.Counter
 import org.scalatest.flatspec.AnyFlatSpec
+import Expr.fork
 
 class PrimitivesSpec extends AnyFlatSpec with ChiselScalatestTester {
   "peek" should "inspect the circuit IO and get its value" in {
@@ -55,6 +56,29 @@ class PrimitivesSpec extends AnyFlatSpec with ChiselScalatestTester {
       } yield (v1.litValue, v2.litValue, v3.litValue)
       val result = VM.run(program, c.clock)
       assert(result == (100, 100, 200))
+    }
+  }
+
+  "fork/join" should "work for queue example" in {
+    class QueueModule[T <: Data](ioType: T, entries: Int) extends MultiIOModule {
+      val in = IO(Flipped(Decoupled(ioType)))
+      val out = IO(Decoupled(ioType))
+      out <> Queue(in, entries)
+    }
+
+    test(new QueueModule(UInt(9.W), entries = 200)) { c =>
+      c.in.initSource()
+      c.in.setSourceClock(c.clock)
+      c.out.initSink()
+      c.out.setSinkClock(c.clock)
+      val testVector = Seq.tabulate(300){ i => i.U }
+
+      val program = for {
+        a <- fork(enqueueSeq(c.in, testVector))
+        b <- fork(dequeueSeq(c.out, testVector))
+        _ <- join(Seq(a, b))
+      } yield ()
+      val result = VM.run(program, c.clock)
     }
   }
 }
