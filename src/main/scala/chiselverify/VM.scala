@@ -1,55 +1,78 @@
 package chiselverify
 
-import scala.collection.mutable.Map
-import scala.collection.mutable.HashMap
 import chisel3._
 import chiseltest._
 
+import scala.collection.mutable.Set
+import scala.collection.mutable.HashSet
+import scala.collection.mutable.ArrayBuffer
+
 object VM {
-  def run[R](expr: Expr[R], clock: Clock): R = {
+  def run[R](expr: Expr[R], clock: chisel3.Clock): R = {
     val vm = new VM[R](clock)
     vm.run(expr)
   }
 }
 
-protected class VM[R](clock: Clock) {
-  private val threads: Map[Expr.ThreadID, Thread[Any]] = new HashMap()
-  var threadCounter = 0
-  var time = 0
+class VM[R](clock: chisel3.Clock) {
+  private val running: Set[Thread[Any]] = new HashSet()
+  private var threadCounter = 0
+  private var time = 0
 
   def run(expr: Expr[R]): R = {
     val main = new Thread(expr)
-    while (!threads.isEmpty) {
-      threads.foreach {case (id, thread) => {
+    while (!running.isEmpty) {
+      // println("TIME " + time)
+      running.foreach {thread => {
+        // println("  THREAD "  + thread.id)
         thread.continue() match {
           case Some(v) => {
             if (main == thread) return v.asInstanceOf[R]
-            threads.remove(id)
+            thread.done = true
           }
           case None => ()
         }
       }}
+      running.toArray.foreach { thread => if (thread.done) {
+        running -= thread
+      }}
+
       clock.step(1)
       time += 1
-      println("==== TIME")
     }
     ???
   }
 
-  private class Thread[+R](start: Expr[R]) {
+  abstract class Monitor {}
+  case class ThreadMonitor(ids: Seq[Thread[Any]]) extends Monitor
+  case class ClockMonitor(time: Int) extends Monitor
+
+  class Frame(val parent: Option[Frame], var expr: Expr[Any])
+
+  protected class Apply[R1,R2](val cn: R1 => Expr[R2]) extends Expr[R2]
+  protected class ApplyRepeat[R](val expr: Expr[R], val n: Int, var i: Int) extends Expr[R] {
+    val returns = new ArrayBuffer[R](n)
+  }
+  protected class ApplyConcat[R](val exprs: Seq[Expr[R]], var i: Int) extends Expr[R] {
+    val returns = new ArrayBuffer[R](exprs.length)
+  }
+
+  class Thread[+R](start: Expr[R]) extends Expr.Thread {
+    val id = threadCounter
     var frame = new Frame(None, start)
     var monitor: Option[Monitor] = None
-    val id: Expr.ThreadID = threadCounter
+    var done = false
 
     threadCounter += 1
-    threads(id) = this
+    running.add(this)
 
-    protected class Frame(val parent: Option[Frame], var expr: Expr[Any])
-
+    // Continue execution of the thread until it encounters a yield point or
+    // completes execution. Returns a None if not yet complete, returns Some(x)
+    // if the thread has completed execution.
     def continue(): Option[R] = {
       val resolved = monitor match {
         case Some(monitor) => monitor match {
-          case ThreadMonitor(ids) => ids.forall(id => !threads.contains(id))
+          case ThreadMonitor(threads) => threads.forall {thread => thread.done}
           case ClockMonitor(time) => time <= VM.this.time
         }
         case None => true
@@ -57,41 +80,67 @@ protected class VM[R](clock: Clock) {
       if (resolved) monitor = None
 
       while (monitor == None) {
+        // `finished` will be some value if the main frame has finished
+        // evaluation. If it hasn't finished yet, then it will return a None.
         val finished = frame.expr match {
-          case Cont(expr, cn) => frame = new Frame(Some(frame), expr)
-          case Until(signal, expr) => {
-            if (signal.peek().litToBoolean == false) {
-              frame = new Frame(Some(frame), expr)
-            } else ret(())
+          // Control
+          case Cont(expr, cn) => {
+            frame.expr = new Apply(cn)
+            frame = new Frame(Some(frame), expr)
           }
-          case Repeat(expr, n) => if (n > 0) {
-            frame.expr = Expr.repeat(expr, n-1)
+          case x: Apply[_, _] => throw new RuntimeException();
+
+          case Until(signal, expr) => if (signal.peek().litToBoolean == false) {
             frame = new Frame(Some(frame), expr)
           } else ret(())
+
+          case Repeat(expr, n) => {
+            frame.expr = new ApplyRepeat(expr, n, 0)
+          }
+          case x: ApplyRepeat[_] => if (x.i < x.n) {
+            x.i = x.i + 1
+            frame = new Frame(Some(frame), x.expr)
+          } else ret(x.returns)
+
           case Concat(exprs) => if (!exprs.isEmpty) {
-            val expr = exprs(0)
-            frame.expr = Expr.concat(exprs.slice(1,exprs.length))
-            frame = new Frame(Some(frame), expr)
-          } else ret(())
-          case Join(threadids) => {
-            monitor = Some(new ThreadMonitor(threadids))
+            frame.expr = new ApplyConcat(exprs,  0)
+          }
+          case x: ApplyConcat[_] => if (x.i < x.exprs.length) {
+            frame = new Frame(Some(frame), x.exprs(x.i))
+            x.i = x.i + 1
+          } else ret(x.returns)
+
+          case Join(threads) => {
+            monitor = Some(new ThreadMonitor(threads.asInstanceOf[Seq[Thread[Any]]]))
             ret(())
           }
+
+          case Fork(expr) => {
+            ret(new Thread(expr).asInstanceOf[R])
+          }
+
           case Step(cycles) => {
             monitor = Some(new ClockMonitor(VM.this.time + cycles))
             ret(())
           }
-          case Fork(expr) => ret(new Thread(expr).id.asInstanceOf[R])
+
+          // Primitives
           case Poke(signal, value) => ret(signal.poke(value))
           case Peek(signal) => ret(signal.peek())
           case Value(r) => ret(r)
           case Expect(signal, value) => {
-            println(signal, value)
+            // println(signal.peek(), value)
             signal.expect(value)
             ret(())
           }
+          case Clock() => ret(time)
+          case Kill(thread) => {
+            // println(thread.getClass())
+            thread.asInstanceOf[Thread[Any]].done = true
+            ret(())
+          }
           case Debug(msg) => {
-            println(msg)
+            // println(msg)
             ret(())
           }
         }
@@ -109,7 +158,7 @@ protected class VM[R](clock: Clock) {
         case None    => return Some(v.asInstanceOf[R])
       }
       frame.expr match {
-        case Cont(_, cn) => frame.expr = cn(v)
+        case x: Apply[Any, _] => frame.expr = x.cn(v)
         case _ => ()
       }
       None
@@ -117,7 +166,4 @@ protected class VM[R](clock: Clock) {
   }
 }
 
-private abstract class Monitor {}
-private case class ThreadMonitor(ids: Seq[Expr.ThreadID]) extends Monitor
-private case class ClockMonitor(time: Int) extends Monitor
 

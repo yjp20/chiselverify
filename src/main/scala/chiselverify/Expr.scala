@@ -5,7 +5,7 @@ import chisel3.util._
 import chiseltest._
 
 object Expr {
-  type ThreadID = Int
+  abstract class Thread
 
   // Primitives
   def poke[R <: Data](signal: R, value: R): Expr[Unit] = Poke(signal, value)
@@ -15,44 +15,41 @@ object Expr {
 
   // Control
   def step(cycles: Int): Expr[Unit] = Step(cycles)
-  def fork[R](expr: Expr[R]): Expr[Expr.ThreadID] = Fork(expr)
-  def join(threadid: Expr.ThreadID): Expr[Unit] = Join(Seq(threadid))
-  def join(threadids: Seq[Expr.ThreadID]): Expr[Unit] = Join(threadids)
+  def fork[R](expr: Expr[R]): Expr[Thread] = Fork(expr)
+  def join(thread: Thread): Expr[Unit] = Join(Seq(thread))
+  def join(threads: Seq[Thread]): Expr[Unit] = Join(threads)
+  def clock() = Clock()
   def until[R](signal: Bool, expr: Expr[R]): Expr[Unit] = Until(signal, expr)
+  def kill(thread: Thread): Expr[Bool] = Kill(thread)
 
   // Combinators
-  def repeat(expr: Expr[_], n: Int): Expr[Unit] = Repeat(expr, n)
-  def concat(exprs: Seq[Expr[_]]): Expr[Unit] = Concat(exprs)
+  def repeat[R](expr: Expr[R], n: Int): Expr[Seq[R]] = Repeat(expr, n)
+  def concat[R](exprs: Seq[Expr[R]]): Expr[Seq[R]] = Concat(exprs.toVector)
 
-  // Utilities
-  def enqueue[R <: Data](x: ReadyValidIO[R], data: R): Expr[Unit] = for {
-    _ <- debug("TRY_ENQUEUE")
+  // Utilties
+  def enqueue[R <: Data](x: DecoupledIO[R], data: R): Expr[Unit] = for {
     _ <- poke(x.bits, data)
     _ <- poke(x.valid, true.B)
     t <- fork(for {
       _ <- until(x.ready, step(1))
-      _ <- debug("DONE_ENQUEUE")
     } yield ())
     _ <- join(t)
     _ <- step(1)
   } yield ()
-  def enqueueSeq[R <: Data](x: ReadyValidIO[R], data: Seq[R]): Expr[Unit] =
+  def enqueueSeq[R <: Data](x: DecoupledIO[R], data: Seq[R]): Expr[Seq[Unit]] =
     concat(data.map { d => enqueue(x, d) })
 
-  def dequeue[R <: Data](x: ReadyValidIO[R], data: R): Expr[Unit] = for {
-    _ <- debug("TRY_DEQUEUE")
-    _ <- poke(x.ready, true.B) 
+  def dequeue[R <: Data](x: DecoupledIO[R], data: R): Expr[Unit] = for {
+    _ <- poke(x.ready, true.B)
     t <- fork(for {
       _ <- until(x.valid, step(1))
       _ <- expect(x.bits, data)
-      _ <- debug("DONE_DEQUEUE")
     } yield ())
     _ <- join(t)
     _ <- step(1)
   } yield ()
-  def dequeueSeq[R <: Data](x: ReadyValidIO[R], data: Seq[R]): Expr[Unit] =
+  def dequeueSeq[R <: Data](x: DecoupledIO[R], data: Seq[R]): Expr[Seq[Unit]] =
     concat(data.map { d => dequeue(x, d) })
-
 }
 
 abstract class Expr[+R] {
@@ -71,11 +68,13 @@ protected case class Poke[R <: Data](signal: R, value: R) extends Expr[Unit]
 protected case class Peek[R <: Data](signal: R) extends Expr[R]
 protected case class Expect[R <: Data](signal: R, value: R) extends Expr[Unit]
 protected case class Debug(msg: String) extends Expr[Unit]
+protected case class Clock() extends Expr[Int]
 // Control
 protected case class Step(cycles: Int) extends Expr[Unit]
-protected case class Fork[R](expr: Expr[R]) extends Expr[Expr.ThreadID]
-protected case class Join(threadids: Seq[Expr.ThreadID]) extends Expr[Unit]
+protected case class Fork[R](expr: Expr[R]) extends Expr[Expr.Thread]
+protected case class Join(threads: Seq[Expr.Thread]) extends Expr[Unit]
 protected case class Until[R](signal: Bool, expr: Expr[R]) extends Expr[Unit]
-protected case class Repeat(expr: Expr[_], n: Int) extends Expr[Unit]
-protected case class Concat(exprs: Seq[Expr[_]]) extends Expr[Unit]
+protected case class Repeat[R](expr: Expr[R], n: Int) extends Expr[Seq[R]]
+protected case class Concat[R](exprs: Vector[Expr[R]]) extends Expr[Seq[R]]
+protected case class Kill(thread: Expr.Thread) extends Expr[Bool]
 

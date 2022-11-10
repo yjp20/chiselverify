@@ -59,6 +59,24 @@ class PrimitivesSpec extends AnyFlatSpec with ChiselScalatestTester {
     }
   }
 
+  "fork/join" should "fork tasks at same time" in {
+    class Pokable extends Module {
+      val a = IO(Input(UInt(32.W)))
+      val aOut = IO(Output(UInt(32.W)))
+      val aReg = RegNext(a) // pipelined loopback
+      aOut := aReg
+    }
+
+    test(new Pokable()) { c =>
+      val program = for {
+        ids <- repeat(fork(clock()), 10)
+        times <- join(ids)
+      } yield (ids)
+
+      val result = VM.run(program, c.clock)
+    }
+  }
+
   "fork/join" should "work for queue example" in {
     class QueueModule[T <: Data](ioType: T, entries: Int) extends MultiIOModule {
       val in = IO(Flipped(Decoupled(ioType)))
