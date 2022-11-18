@@ -69,16 +69,18 @@ class PrimitivesSpec extends AnyFlatSpec with ChiselScalatestTester {
 
     test(new Pokable()) { c =>
       val program = for {
-        ids <- repeat(fork(clock()), 10)
+        ids <- repeat(fork(time()), 10)
         times <- join(ids)
-      } yield (ids)
+      } yield (times)
 
       val result = VM.run(program, c.clock)
+      // FIXME: Doesn't actually verify anything yet
+      println(result)
     }
   }
 
   "fork/join" should "work for queue example" in {
-    class QueueModule[T <: Data](ioType: T, entries: Int) extends MultiIOModule {
+    class QueueModule[T <: Data](ioType: T, entries: Int) extends Module {
       val in = IO(Flipped(Decoupled(ioType)))
       val out = IO(Decoupled(ioType))
       out <> Queue(in, entries)
@@ -89,8 +91,8 @@ class PrimitivesSpec extends AnyFlatSpec with ChiselScalatestTester {
       c.in.setSourceClock(c.clock)
       c.out.initSink()
       c.out.setSinkClock(c.clock)
-      val testVector = Seq.tabulate(300){ i => i.U }
 
+      val testVector = Seq.tabulate(300){ i => i.U }
       val program = for {
         a <- fork(enqueueSeq(c.in, testVector))
         b <- fork(dequeueSeq(c.out, testVector))

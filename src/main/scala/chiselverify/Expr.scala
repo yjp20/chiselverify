@@ -5,7 +5,7 @@ import chisel3.util._
 import chiseltest._
 
 object Expr {
-  abstract class Thread
+  abstract class Thread(val typename: Option[String] = None)
 
   // Primitives
   def poke[R <: Data](signal: R, value: R): Expr[Unit] = Poke(signal, value)
@@ -15,10 +15,10 @@ object Expr {
 
   // Control
   def step(cycles: Int): Expr[Unit] = Step(cycles)
-  def fork[R](expr: Expr[R]): Expr[Thread] = Fork(expr)
+  def fork[R](expr: Expr[R], typename: Option[String] = None): Expr[Thread] = Fork(expr, typename)
   def join(thread: Thread): Expr[Unit] = Join(Seq(thread))
   def join(threads: Seq[Thread]): Expr[Unit] = Join(threads)
-  def clock() = Clock()
+  def time() = Time()
   def until[R](signal: Bool, expr: Expr[R]): Expr[Unit] = Until(signal, expr)
   def kill(thread: Thread): Expr[Bool] = Kill(thread)
 
@@ -32,7 +32,7 @@ object Expr {
     _ <- poke(x.valid, true.B)
     t <- fork(for {
       _ <- until(x.ready, step(1))
-    } yield ())
+    } yield (), Some("enqueue_wait"))
     _ <- join(t)
     _ <- step(1)
   } yield ()
@@ -44,7 +44,7 @@ object Expr {
     t <- fork(for {
       _ <- until(x.valid, step(1))
       _ <- expect(x.bits, data)
-    } yield ())
+    } yield (), Some("dequeue_wait"))
     _ <- join(t)
     _ <- step(1)
   } yield ()
@@ -68,10 +68,10 @@ protected case class Poke[R <: Data](signal: R, value: R) extends Expr[Unit]
 protected case class Peek[R <: Data](signal: R) extends Expr[R]
 protected case class Expect[R <: Data](signal: R, value: R) extends Expr[Unit]
 protected case class Debug(msg: String) extends Expr[Unit]
-protected case class Clock() extends Expr[Int]
+protected case class Time() extends Expr[Int]
 // Control
 protected case class Step(cycles: Int) extends Expr[Unit]
-protected case class Fork[R](expr: Expr[R]) extends Expr[Expr.Thread]
+protected case class Fork[R](expr: Expr[R], typename: Option[String]) extends Expr[Expr.Thread]
 protected case class Join(threads: Seq[Expr.Thread]) extends Expr[Unit]
 protected case class Until[R](signal: Bool, expr: Expr[R]) extends Expr[Unit]
 protected case class Repeat[R](expr: Expr[R], n: Int) extends Expr[Seq[R]]

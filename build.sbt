@@ -7,7 +7,7 @@ scalacOptions := Seq(
   "-Xcheckinit",
 )
 lazy val chiselverify = (project in file("."))
-fork in run := true
+Test / fork := true
 
 // CHISEL
 addCompilerPlugin("edu.berkeley.cs" % "chisel3-plugin" % "3.5.2" cross CrossVersion.full)
